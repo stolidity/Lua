@@ -37,7 +37,7 @@ config = require 'config'
 
 _addon.name = 'Organizer'
 _addon.author = 'Byrth, maintainer: Rooks'
-_addon.version = 0.20150923
+_addon.version = 0.20160518
 _addon.commands = {'organizer','org'}
 
 _static = {
@@ -51,7 +51,8 @@ _static = {
         sack=6,
         case=7,
         wardrobe=8,
-        safe2=9
+        safe2=9,
+        wardrobe2=10
     }
 }
 
@@ -67,7 +68,8 @@ _valid_dump = {}
 
 default_settings = {
     dump_bags = {['Safe']=1,['Safe2']=2,['Locker']=3,['Storage']=4},
-    bag_priority = {['Safe']=1,['Safe2']=2,['Locker']=3,['Storage']=4,['Satchel']=5,['Sack']=6,['Case']=7,['Inventory']=8,['Wardrobe']=9},
+    bag_priority = {['Safe']=1,['Safe2']=2,['Locker']=3,['Storage']=4,['Satchel']=5,['Sack']=6,['Case']=7,['Inventory']=8,['Wardrobe']=9,['Wardrobe2']=10},
+    equip_priority = {['Wardrobe']=1,['Wardrobe2']=2,['Inventory']=3},
     item_delay = 0,
     ignore = {},
     retain = {
@@ -90,7 +92,8 @@ _debugging = {
         ['items']=true,
         ['move']=true,
         ['settings']=true,
-        ['stacks']=true
+        ['stacks']=true,
+        ['loadout']=true
     },
     debug_log = 'data\\organizer-debug.log',
     enabled = false,
@@ -173,6 +176,11 @@ function options_load( )
         _valid_dump[s_to_bag(bag_name)] = 1
     end
 
+    -- older configs don't have this, so give them the defaults
+    if not settings.equip_priority then
+        settings.equip_priority = default_settings.equip_priority
+    end
+
     -- Build the retain lists
     if(settings.retain) then
         if(settings.retain.moogle_slip_gear == true) then
@@ -209,11 +217,13 @@ function options_load( )
         end
     end
 
-    -- Always allow inventory and wardrobe, obviously
+    -- Always allow inventory and wardrobes, obviously
     _valid_dump[0] = 1
     _valid_pull[0] = 1
     _valid_dump[8] = 1
     _valid_pull[8] = 1
+    _valid_dump[10] = 1
+    _valid_pull[10] = 1
 
 end
 
@@ -251,10 +261,13 @@ windower.register_event('addon command',function(...)
 
     if (command == 'g' or command == 'get') then
         org_debug("command", "Calling get with file_name '"..file_name.."' and bag '"..bag.."'")
-        get(thaw(file_name, bag))
+        get(thaw(file_name, bag, false))
     elseif (command == 't' or command == 'tidy') then
         org_debug("command", "Calling tidy with file_name '"..file_name.."' and bag '"..bag.."'")
-        tidy(thaw(file_name, bag))
+        tidy(thaw(file_name, bag, false))
+    elseif (command == 'lo' or command == 'loadout') then
+        org_debug("command", "Calling loadout with file_name '"..file_name.."' and bag '"..bag.."'")
+        loadout(thaw(file_name, bag, true))
     elseif (command == 'f' or command == 'freeze') then
 
         org_debug("command", "Calling freeze command")
@@ -278,7 +291,7 @@ windower.register_event('addon command',function(...)
         end
     elseif (command == 'o' or command == 'organize') then
         org_debug("command", "Calling organize command")
-        organize(thaw(file_name, bag))
+        organize(thaw(file_name, bag, false))
     end
 
     if settings.auto_heal and tostring(settings.auto_heal):lower() ~= 'false' then
@@ -419,6 +432,124 @@ function organize(goal_items)
     end
 end
 
+-- This is the GearSwap specific method; we get a big pile of items labeled
+-- 'inventory', and sort them out accordingly. It looks a lot like organize()
+-- to start with, for good reason.
+
+function loadout(loadout_items)
+    org_message('Starting loadout!')
+    local current_items = Items.new()
+
+    run = true
+    safeguard = 10
+    while(run and safeguard > 0) do
+        if loadout_get(loadout_items, current_items) then
+            -- we got a true back, so we're done
+            run = false
+        end
+        loadout_tidy(loadout_items, current_items)
+        safeguard = safeguard - 1
+    end
+    if safeguard == 0 then
+        org_error("Exhausted attempts. Please re-try or investigate manually.")
+    else
+        org_verbose("Loadout completed successfully!")
+    end
+end
+
+-- The loadout version of get
+-- Find any items we need to and drop them in the equipment bags if possible
+function loadout_get(loadout_items, current_items)
+    org_debug("command", "Entering loadout_get()")
+    current_items = current_items or Items.new()
+    equip_bags = get_equip_bags()
+    local inventory_max = windower.ffxi.get_bag_info(_static.bag_ids.inventory).max
+    local wardrobe_max = windower.ffxi.get_bag_info(_static.bag_ids.wardrobe).max
+    local wardrobe_2_max = windower.ffxi.get_bag_info(_static.bag_ids.wardrobe2).max
+
+    count = 0
+    for inv_type,inv_table in pairs(loadout_items) do
+        for inv_slot,item in pairs(inv_table) do
+            org_debug("loadout", "Loadout looking for "..res.items[item.id].english)
+            found = 0
+            for _, equip_bag_id in pairs(equip_bags) do
+                equip_bag_check = current_items[equip_bag_id]:find_all_instances(item, false, true)
+--                windower.add_to_chat(123, equip_bag_check)
+                if equip_bag_check then
+                    found = 1
+                    org_debug("loadout", "#"..count..": Loadout found "..res.items[item.id].english.." in "..res.bags[equip_bag_id].english)
+                    -- This is only ever going to have one, but the method gives us an iterator
+                    for i in equip_bag_check:it() do
+                    -- Found it. Let's try and put it as far into the wardrobe as we can.
+                        org_debug("loadout", "Trying to put "..res.items[item.id].english.." deeper into the wardrobe")
+                        if current_items[equip_bag_id][i]:put_away(get_equip_bags()) then
+                            simulate_item_delay()
+                        end
+                    end
+                    break
+                end
+            end
+
+            -- If we didn't find it, then we need to go get it.
+            if found == 0 then
+                found_bag_id, found_bag_index = current_items:find(item)
+                if found_bag_id then
+                    org_debug("loadout", "#"..count.." Loadout found "..res.items[item.id].english.." elsewhere in inventory: bag ID "..found_bag_id.." and slot"..found_bag_index)
+                    current_items[found_bag_id][found_bag_index]:transfer(0)
+                    simulate_item_delay()
+                else
+                    org_debug("loadout", "#"..count.." Loadout didn't find "..res.items[item.id].english.." at all.")
+                end
+            end
+            count = count + 1
+        end
+        org_debug("loadout", "cycle done")
+    end
+    -- We finished!
+    return true
+end
+
+-- The loadout version of tidy.
+-- Cycle through wardrobes and and inventory, cleaning out whatever you can
+function loadout_tidy(loadout_items, current_items)
+    org_debug("command", "Entering loadout_tidy()")
+    usable_bags = get_dump_bags()
+    current_items = current_items or Items.new()
+    local inventory_max = windower.ffxi.get_bag_info(_static.bag_ids.inventory).max
+
+    -- Cycle through inventory/wardrobes, clean out what we can
+    for _,bag_id in ipairs({ _static.bag_ids.inventory, _static.bag_ids.wardrobe, _static.bag_ids.wardrobe2 }) do
+        for index, item in current_items[bag_id]:it() do
+            found = 0
+            for inv_type,inv_table in pairs(loadout_items) do
+                for inv_slot,loadout_item in pairs(inv_table) do
+                    if item.id == loadout_item.id then
+                        if not item.augments or table.length(item.augments) == 0 or loadout_item.augments and extdata.compare_augments(item.augments,loadout_item.augments) then
+                            found = 1
+                        end
+                    end
+                end
+            end
+            if found == 0 then
+                org_debug("loadout", "Putting away "..item.log_name)
+                if not current_items[bag_id][index]:put_away(usable_bags) then
+                    -- Ran out of room
+                    return false
+                else
+                    simulate_item_delay()
+                end
+            end
+        end
+        org_debug("loadout", "Finished bag "..bag_id)
+    end
+
+    -- Is our inventory still full?
+    if current_items[_static.bag_ids.inventory].n == inventory_max then
+        org_error('Unable to make space, aborting!')
+        return false
+    end
+end
+
 function clean_goal(goal_items,current_items)
     for i,inv in goal_items:it() do
         for ind,item in inv:it() do
@@ -448,27 +579,34 @@ function incompletion_check(goal_items,remainder)
     return remaining ~= 0 and remaining < remainder and remaining
 end
 
-function thaw(file_name,bag)
+function thaw(file_name,bag,loadout)
     local bags = _static.bag_ids[bag] and {[bag]=file_name} or table.reassign({},_static.bag_ids) -- One bag name or all of them if no bag is specified
     if settings.default_file:sub(-4) ~= '.lua' then
         settings.default_file = settings.default_file..'.lua'
     end
     for i,v in pairs(_static.bag_ids) do
-        bags[i] = bags[i] and windower.file_exists(windower.addon_path..'data/'..i..'/'..file_name) and file_name or default_file_name()
+        if file_name then
+            bags[i] = bags[i] and windower.file_exists(windower.addon_path..'data/'..i..'/'..file_name) and file_name
+        else
+            bags[i] = bags[i] and windower.file_exists(windower.addon_path..'data/'..i..'/'..default_file_name()) and default_file_name()
+        end
     end
     bags.temporary = nil
     local inv_structure = {}
     for cur_bag,file in pairs(bags) do
-        local f,err = loadfile(windower.addon_path..'data/'..cur_bag..'/'..file)
-        if f and not err then
-            local success = false
-            success, inv_structure[cur_bag] = pcall(f)
-            if not success then
-                org_warning('User File Error (Syntax) - '..inv_structure[cur_bag])
-                inv_structure[cur_bag] = nil
+        org_verbose("thaw bag: "..cur_bag)
+        if file then
+            local f,err = loadfile(windower.addon_path..'data/'..cur_bag..'/'..file)
+            if f and not err then
+                local success = false
+                success, inv_structure[cur_bag] = pcall(f)
+                if not success then
+                    org_warning('User File Error (Syntax) - '..inv_structure[cur_bag])
+                    inv_structure[cur_bag] = nil
+                end
+            elseif bag and cur_bag:lower() == bag:lower() then
+                org_warning('User File Error (Loading) - '..err)
             end
-        elseif bag and cur_bag:lower() == bag:lower() then
-            org_warning('User File Error (Loading) - '..err)
         end
     end
     -- Convert all the extdata back to a normal string
@@ -479,7 +617,11 @@ function thaw(file_name,bag)
             end
         end
     end
-    return Items.new(inv_structure)
+    if loadout then
+        return inv_structure
+    else
+        return Items.new(inv_structure)
+    end
 end
 
 function org_message(msg,col)
@@ -538,4 +680,29 @@ function get_dump_bags()
         end
     end
     return dump_bags
+end
+
+function get_equip_bags()
+    local equip_bags = {}
+    for i,v in pairs(settings.equip_priority) do
+        if i and s_to_bag(i) then
+            equip_bags[tonumber(v)] = s_to_bag(i)
+        elseif i then
+            org_error('The bag name ("'..tostring(i)..'") in equip_bags entry #'..tostring(v)..' in the ../addons/organizer/data/settings.xml file is not valid.\nValid options are '..tostring(res.bags))
+            return
+        end
+    end
+    return equip_bags
+end
+
+function tprint(tab)
+    for k,v in pairs(tab) do
+--        typ = type(v)
+  --      if typ == 'table' then
+    --        tprint(v)
+      --  else
+        windower.add_to_chat(121, "key: "..tostring(k))
+        windower.add_to_chat(123, "value: "..tostring(v))
+        --end
+    end
 end
