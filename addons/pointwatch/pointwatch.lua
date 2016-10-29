@@ -302,7 +302,7 @@ function exp_msg(val,msg)
             cp.number_of_job_points = math.min(cp.number_of_job_points + math.floor(cp.current/cp.tnjp),cp.maximum_job_points)
             cp.current = cp.current%cp.tnjp
         end
-    elseif msg == 8 or msg == 105 then
+    elseif msg == 8 or msg == 253 then
         xp.registry[t] = (xp.registry[t] or 0) + val
         xp.total = xp.total + val
         xp.current = math.min(xp.current + val,55999)
